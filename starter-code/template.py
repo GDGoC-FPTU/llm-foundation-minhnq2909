@@ -12,7 +12,10 @@ Instructions:
 import os
 import time
 from typing import Any, Callable
-
+from openai import OpenAI
+from google import genai
+from google.genai import types
+import anthropic
 # ---------------------------------------------------------------------------
 # Estimated costs per 1M INPUT & OUTPUT tokens (USD) as of March 2026
 # Vietnamese text generally consumes ~1.5x - 2.0x more tokens than English due to Unicode/diacritics.
@@ -67,7 +70,24 @@ def call_openai(
     """
     # TODO: Import OpenAI, instantiate client, call chat.completions.create with parameters,
     #       measure execution start/end time, extract text and token usage, and return them.
-    raise NotImplementedError("Implement call_openai")
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    start_time = time.time()
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+    latency = time.time() - start_time
+
+    response_text = response.choices[0].message.content
+    usage = {
+        "input_tokens": response.usage.prompt_tokens,
+        "output_tokens": response.usage.completion_tokens,
+    }
+    return response_text, latency, usage
+    # raise NotImplementedError("Implement call_openai")
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +135,27 @@ def call_gemini(
     """
     # TODO: Initialize Gemini client, set config parameters, call generate_content,
     #       measure latency, extract response text and usage metadata, and return the tuple.
-    raise NotImplementedError("Implement call_gemini")
+
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    config = types.GenerateContentConfig(
+        temperature=temperature,
+        top_p=top_p,
+        max_output_tokens=max_tokens,
+    )
+    start_time = time.time()
+    response = client.models.generate_content(
+        model=model,
+        contents=[types.ContentItem(text=prompt)],
+        config=config,
+    )
+    latency = time.time() - start_time
+    response_text = response.text
+    usage = {
+        "input_tokens": response.usage_metadata.prompt_token_count,
+        "output_tokens": response.usage_metadata.candidates_token_count,
+    }
+    return response_text, latency, usage
+    # raise NotImplementedError("Implement call_gemini")
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +192,8 @@ def call_anthropic(
     """
     # TODO: Initialize Anthropic client, create message, measure latency,
     #       extract content text and usage statistics, and return the tuple.
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
     raise NotImplementedError("Implement call_anthropic")
 
 
@@ -180,7 +222,40 @@ def compare_models(prompt: str) -> dict:
     # TODO: Calculate costs exactly based on input and output token counts using PRICING_1M_TOKENS
     #       Formula: Cost = (input_tokens * input_rate_per_1M + output_tokens * output_rate_per_1M) / 1,000,000
     # TODO: Assemble and return the comparison dictionary.
-    raise NotImplementedError("Implement compare_models")
+    def calculate_cost(model_key: str, input_tokens: int, output_tokens: int) -> float:
+        rates = PRICING_1M_TOKENS[model_key]
+        cost = (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000
+        return cost
+    resp_4o, latency_4o, usage_4o = call_openai(prompt, model=OPENAI_MODEL)
+    resp_4o_mini, latency_4o_mini, usage_4o_mini = call_openai(prompt, model=OPENAI_MINI_MODEL)
+    resp_gemini, latency_gemini, usage_gemini = call_gemini(prompt, model=GEMINI_MODEL)
+    cost_4o = calculate_cost("gpt-4o", usage_4o["input_tokens"], usage_4o["output_tokens"])
+    cost_4o_mini = calculate_cost("gpt-4o-mini", usage_4o_mini["input_tokens"], usage_4o_mini["output_tokens"])
+    cost_gemini = calculate_cost("gemini-2.5-flash", usage_gemini["input_tokens"], usage_gemini["output_tokens"])
+    return {
+        "gpt4o": {
+            "response": resp_4o,
+            "latency": latency_4o,
+            "cost": cost_4o,
+            "input_tokens": usage_4o["input_tokens"],
+            "output_tokens": usage_4o["output_tokens"],
+        },
+        "gpt4o_mini": {
+            "response": resp_4o_mini,
+            "latency": latency_4o_mini,
+            "cost": cost_4o_mini,
+            "input_tokens": usage_4o_mini["input_tokens"],
+            "output_tokens": usage_4o_mini["output_tokens"],
+        },
+        "gemini_flash": {
+            "response": resp_gemini,
+            "latency": latency_gemini,
+            "cost": cost_gemini,
+            "input_tokens": usage_gemini["input_tokens"],
+            "output_tokens": usage_gemini["output_tokens"],
+        },
+    }
+    #raise NotImplementedError("Implement compare_models")
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +276,46 @@ def streaming_chatbot() -> None:
         - Keep history limited to the last 3 turns to optimize context window and costs.
     """
     # TODO: Setup interactive session, prompt user for input, stream response, and update history.
-    raise NotImplementedError("Implement streaming_chatbot")
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    history = []
+    
+    print("Chatbot Gemini đã sẵn sàng! Gõ 'quit' hoặc 'exit' để thoát.\n")
+    
+    while True:
+        try:
+            user_input = input("User: ")
+        except (KeyboardInterrupt, EOFError):
+            break
+            
+        if user_input.strip().lower() in ['quit', 'exit']:
+            print("Kết thúc phiên chat.")
+            break
+            
+        history.append({"role": "user", "parts": [{"text": user_input}]})
+        
+        # Keep only the last 6 messages (3 turns: user+model)
+        if len(history) > 6:
+            history = history[-6:]
+            
+        print("Gemini: ", end="", flush=True)
+        try:
+            response_stream = client.models.generate_content_stream(
+                model=GEMINI_MODEL,
+                contents=history
+            )
+            
+            full_response = ""
+            for chunk in response_stream:
+                print(chunk.text, end="", flush=True)
+                full_response += chunk.text
+            print("\n")
+            
+            history.append({"role": "model", "parts": [{"text": full_response}]})
+        except Exception as e:
+            print(f"\n[Lỗi API]: {e}\n")
+            # Xóa tin nhắn user vừa nhập ra khỏi history vì bot bị lỗi không phản hồi được
+            history.pop()
+    ##raise NotImplementedError("Implement streaming_chatbot")
 
 
 # ---------------------------------------------------------------------------
